@@ -14,6 +14,7 @@ import datetime
 import hashlib
 import json
 import os
+import time
 
 import requests
 
@@ -40,7 +41,16 @@ def get(endpoint, **params):
         with open(fname) as f:
             return json.load(f)
 
-    r = requests.get(f"{BASE}/{endpoint}", params=params)
+    # OpenF1 is free and rate-limits fairly aggressively. Retry with
+    # backoff on a 429 rather than letting the whole page crash - this
+    # matters in the UI, where switching drivers can fire several requests
+    # at once.
+    for attempt in range(5):
+        r = requests.get(f"{BASE}/{endpoint}", params=params)
+        if r.status_code == 429:
+            time.sleep(2 ** attempt)   # 1s, 2s, 4s, 8s, 16s
+            continue
+        break
 
     # OpenF1 returns 404 with {"detail": "No results found."} when a query
     # matches nothing, rather than an empty list. That's a normal outcome for

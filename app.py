@@ -9,6 +9,8 @@ results out.
 Run it with:  streamlit run app.py
 """
 
+import io
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
@@ -16,6 +18,7 @@ import streamlit as st
 import f1data
 import lap_times
 import racing_line
+import speed_delta
 import tire_deg
 
 st.set_page_config(page_title="F1 Telemetry Explorer",
@@ -109,9 +112,28 @@ if d1 == d2:
 
 selected = (d1, d2)
 
-# A driver can be entered in a race but have no usable laps - a lap 1 retirement
-# still shows up in the drivers endpoint. Catch that here rather than letting
-# every plot below fail in its own way.
+# A driver can be entered in a race but have no usable laps. Two different
+# reasons for that, and they need different messages:
+#  - the whole SESSION has no lap data at all (OpenF1 just hasn't backfilled
+#    it - true for Jeddah and Sakhir 2026 as of writing) -> pick another race
+#  - one driver individually has almost none (a lap 1 retirement, e.g.
+#    Verstappen at Zandvoort 2026) -> pick another driver
+try:
+    session_laps = [max_lap(session_key, n) for n in numbers]
+except Exception as e:
+    st.error(f"Couldn't reach OpenF1 to check this session: {e}\n\n"
+            f"It's a free API and occasionally rate-limits or hiccups - "
+            f"waiting a few seconds and picking the race again usually "
+            f"fixes it.", icon="🌐")
+    st.stop()
+
+if max(session_laps, default=0) < 5:
+    st.error(
+        f"OpenF1 doesn't have lap data for **{f1data.race_label(race)}** "
+        f"yet - the endpoints return nothing for this session, for every "
+        f"driver. Pick a different race from the sidebar.", icon="🛑")
+    st.stop()
+
 too_short = [f1data.driver_code(session_key, n) for n in selected
              if max_lap(session_key, n) < 5]
 if too_short:
@@ -167,8 +189,17 @@ def dark(fn, *args, **kwargs):
     return result
 
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Racing line", "Lap times", "Tire degradation", "About the data"])
+def download_button(fig, filename, key):
+    """PNG download button for a matplotlib figure, saved at full res."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=180, bbox_inches="tight")
+    st.download_button("Download PNG", buf.getvalue(), file_name=filename,
+                       mime="image/png", key=key)
+
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Racing line", "Speed delta", "Lap times",
+     "Tire degradation", "About the data"])
 
 
 # --- racing line ---------------------------------------------------------
@@ -193,6 +224,7 @@ with tab1:
             st.caption(f"**{faster} quicker by {abs(gap):.3f}s** on this lap.")
 
         st.pyplot(fig, width="stretch")
+        download_button(fig, f"racing_line_{code1}_vs_{code2}.png", "dl_line")
         plt.close(fig)
 
         if not same_lap:
@@ -205,9 +237,46 @@ with tab1:
         st.error(f"Couldn't build the racing line: {e}")
 
 
-# --- lap times -----------------------------------------------------------
+# --- speed delta / track dominance ---------------------------------------
 
 with tab2:
+    if not same_lap:
+        st.info(
+            "This comparison needs both drivers on the **same lap** so "
+            "they're on equal fuel and track state. Turn on "
+            "**Compare the same lap** in the sidebar.", icon="🔒")
+    else:
+        try:
+            with st.spinner("Aligning both cars onto a common track position..."):
+                fig, r = dark(speed_delta.build_figure,
+                             session_key, selected, lap_number)
+            leader = code2 if r["pct_b_faster"] > 50 else code1
+            st.metric(f"{leader} was faster around more of the lap",
+                      f"{max(r['pct_b_faster'], 100 - r['pct_b_faster']):.0f}%"
+                      f" of lap {lap_number}")
+            st.pyplot(fig, width="stretch")
+            download_button(fig, f"speed_delta_{code1}_vs_{code2}_lap{lap_number}.png",
+                            "dl_delta")
+            plt.close(fig)
+            st.caption(
+                "**How to read this:** both drivers' speed traces are lined up "
+                "by fraction of distance around the lap (not by time), since "
+                "that's the only axis they share. The left map colors each "
+                "chunk of track by whoever was faster there on average. The "
+                "right panel is the raw speed gap at every point.\n\n"
+                "**Watch out for the tall narrow spikes** near braking zones - "
+                "those are usually a few metres of difference in *where* each "
+                "driver braked, not a sustained speed advantage. A driver "
+                "still at full speed 5m before their brake point will show as "
+                "'faster' than someone who already started braking, even if "
+                "their actual braking is identical.")
+        except Exception as e:
+            st.error(f"Couldn't build the speed delta: {e}")
+
+
+# --- lap times -----------------------------------------------------------
+
+with tab3:
     try:
         with st.spinner("Loading lap times..."):
             fig, summary = dark(lap_times.build_figure, session_key, selected)
@@ -218,6 +287,7 @@ with tab2:
                 st.caption(f"{s['clean_laps']} clean laps · "
                            f"median {s['median']}s")
         st.pyplot(fig, width="stretch")
+        download_button(fig, f"lap_times_{code1}_vs_{code2}.png", "dl_laps")
         plt.close(fig)
         st.caption("Hollow markers are safety car and pit out-laps, excluded "
                    "from the analysis. Dotted vertical lines are pit stops.")
@@ -227,12 +297,13 @@ with tab2:
 
 # --- tire degradation ----------------------------------------------------
 
-with tab3:
+with tab4:
     try:
         with st.spinner("Loading stints..."):
             fig, rows = dark(tire_deg.build_figure,
                              session_key, selected, fuel_effect)
         st.pyplot(fig, width="stretch")
+        download_button(fig, f"tire_deg_{code1}_vs_{code2}.png", "dl_deg")
         plt.close(fig)
 
         table = pd.DataFrame(rows).rename(columns={
@@ -254,7 +325,7 @@ with tab3:
 
 # --- notes ---------------------------------------------------------------
 
-with tab4:
+with tab5:
     st.markdown("""
 ### Where this data comes from
 
@@ -270,6 +341,23 @@ authentication. Data is organised as `meeting` (a race weekend) →
 | `location` | ~4 Hz | `x`, `y`, `z` position - the track map |
 | `car_data` | ~4 Hz | Speed, throttle, brake, gear |
 | `stints` | 1/stint | Tire compound and age |
+
+### Speed delta / track dominance
+
+The racing line and lap-time plots compare drivers in aggregate. The
+**Speed delta** tab compares them point-by-point around the track: both
+drivers' speed traces get reduced to "fraction of distance around the lap"
+(via cumulative GPS distance) and resampled onto one shared 400-point grid,
+which makes them directly comparable even though the raw GPS samples never
+land at the same spot on track. That's the same kind of problem as the
+location/car_data merge, one level up - no shared key, so build a common axis
+and interpolate onto it.
+
+One artifact worth knowing about: sharp narrow spikes in the delta, usually
+right at a braking zone, are typically a few metres of difference in *where*
+each driver started braking - not a sustained speed advantage. A car still
+at full speed 5m before its brake point reads as "faster" than one that's
+already on the brakes, even if the braking itself is identical.
 
 ### The bit that was actually hard
 

@@ -20,6 +20,7 @@ The worked example throughout is the **Belgian GP 2026** at Spa-Francorchamps
 | `lap_times.py` | Lap time comparison over the race |
 | `racing_line.py` | Track map drawn from GPS coordinates, colored by speed |
 | `tire_deg.py` | Lap time vs tire age per stint, with a fuel-burn correction |
+| `speed_delta.py` | Where on track one driver gains or loses time on the other |
 
 Plots are written to `plots/`.
 
@@ -87,6 +88,27 @@ units, so I measured them: I summed the distance between consecutive points
 around one lap and compared to Spa's official 7004 m. That gave 9.89 units per
 metre, so the unit is 1/10 m. It comes in just under 10 because straight lines
 between 4 Hz samples cut the corners slightly.
+
+## Speed delta: where on track is a driver actually faster?
+
+The racing line and lap-time plots compare drivers in aggregate. This asks a
+more specific question: at *this* point on the track, who's faster?
+
+GPS samples from two different cars never land at the same spot on track, so
+there's no shared index to compare speed at "the same point" directly - the
+same kind of problem as merging `location` and `car_data`, one level up. The
+fix: turn each driver's path into "fraction of distance completed" (via
+cumulative distance along their own GPS trace) and interpolate both drivers'
+speed onto one common 400-point grid of that fraction. Once both are sampled
+at the same 400 positions around the lap, they're directly comparable, and
+the difference at each point can be drawn as a track map (colored by who's
+faster in each chunk) or a delta trace.
+
+One artifact worth knowing: sharp narrow spikes in the delta, usually right
+at a braking zone, are typically a few metres of difference in *where* each
+driver started braking, not a sustained speed advantage. A car still at full
+speed 5m before its brake point reads as "faster" than one already on the
+brakes, even if the braking itself is identical.
 
 ## The interesting technical problem: joining two telemetry streams
 
@@ -174,6 +196,23 @@ load and the same track state - the only large difference left is tire age:
 Norris's set was 24 laps old, Verstappen's 7. Verstappen was 1.1s faster
 (109.801s vs 110.903s). That is close to a clean read on what 17 laps of tire
 wear costs at Spa.
+
+## What broke when I tested beyond the one race I built this against
+
+Running the same code against other races surfaced real bugs, not just
+missing data:
+
+- **OpenF1 returns HTTP 429 (rate limited) under repeated requests.** It's a
+  free API with no key, so this is expected under load - a first page load
+  with an uncached driver pair can trip it. `f1data.get()` retries with
+  exponential backoff (up to ~30s total) before giving up.
+- **A driver can be listed in a session's driver list with almost no lap
+  data**, for two different reasons that need different messages: the whole
+  session has no data at all yet (Jeddah and Sakhir 2026, as of testing -
+  OpenF1 hadn't backfilled them), versus one driver individually retired
+  early (Verstappen, Zandvoort 2026, one lap row with a null duration). The
+  UI checks the session first and tells you to pick a different race, then
+  checks individual drivers and tells you to pick a different driver.
 
 ## Data coverage is uneven, and the code has to expect that
 

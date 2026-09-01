@@ -1,14 +1,20 @@
-# F1 Telemetry Analysis - Belgian GP 2026
+# F1 Telemetry Analysis
 
-Comparing Lando Norris (McLaren) and Max Verstappen (Red Bull) at
-Spa-Francorchamps using free telemetry from the [OpenF1 API](https://openf1.org).
+Compare any two drivers in any race using free telemetry from the
+[OpenF1 API](https://openf1.org). Draws the racing line from GPS coordinates
+colored by speed, compares lap times, and measures tire degradation.
 
-Session: `session_key=11334`, race, 19 July 2026.
+Comes with a Streamlit UI for picking the race and drivers, or you can run the
+scripts directly.
+
+The worked example throughout is the **Belgian GP 2026** at Spa-Francorchamps
+(`session_key=11334`), Norris vs Verstappen.
 
 ## What's here
 
 | Script | What it does |
 | --- | --- |
+| `app.py` | Streamlit UI - pick a season, race and two drivers, see all three plots |
 | `explore_sessions.py` | Lists races for a season and drivers in a session, to find a `session_key` |
 | `f1data.py` | Shared API helper with an on-disk cache, plus session/driver config |
 | `lap_times.py` | Lap time comparison over the race |
@@ -19,11 +25,23 @@ Plots are written to `plots/`.
 
 ## Running it
 
+Set up once:
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
 
+The UI, which is the easiest way to explore:
+
+```bash
+streamlit run app.py
+```
+
+Or the individual scripts, which use the defaults in `f1data.py`:
+
+```bash
 python lap_times.py
 python racing_line.py            # each driver's fastest lap
 python racing_line.py --lap 25   # both drivers on the same lap
@@ -31,6 +49,7 @@ python tire_deg.py
 ```
 
 Responses are cached in `cache/`, so only the first run hits the network.
+Delete that folder to force fresh API calls.
 
 ## The OpenF1 endpoints I used
 
@@ -47,10 +66,21 @@ every endpoint is filtered by `session_key`.
 | `car_data` | ~4 Hz | `speed`, `throttle`, `brake`, `n_gear`, `rpm`, `drs`, `date` |
 | `stints` | 1/stint | `compound`, `lap_start`, `lap_end`, `tyre_age_at_start` |
 
-Two things that cost me time and are worth knowing:
+Four things that cost me time and are worth knowing:
 
 **Sprints are `session_type="Race"` too.** Filtering sessions by type gives you
 sprint races mixed in with grands prix. Filter on `session_name` instead.
+
+**A query that matches nothing returns HTTP 404**, with body
+`{"detail": "No results found."}`, rather than an empty list. My first version
+called `raise_for_status()` and crashed on what is really a normal outcome.
+`f1data.get()` now turns a 404 into an empty list.
+
+**Timestamp formats are inconsistent between sessions**, and sometimes within
+one response. Spa returns `2026-07-19T14:27:10.083000+00:00` (microseconds),
+Monaco returns `2026-06-07T13:02:11+00:00` (none). `pd.to_datetime` infers the
+format from the first row and then throws on any row that differs, so every
+call passes `format="ISO8601"`.
 
 **`location` x/y/z are in decimetres, not metres.** OpenF1 doesn't document the
 units, so I measured them: I summed the distance between consecutive points
@@ -144,6 +174,22 @@ load and the same track state - the only large difference left is tire age:
 Norris's set was 24 laps old, Verstappen's 7. Verstappen was 1.1s faster
 (109.801s vs 110.903s). That is close to a clean read on what 17 laps of tire
 wear costs at Spa.
+
+## Data coverage is uneven, and the code has to expect that
+
+Testing the app on races other than Spa turned up two failure modes that
+aren't bugs in my code, they're just what the data looks like:
+
+- **Two of the 14 completed 2026 races (Jeddah, Sakhir) have no `location` or
+  `car_data` at all.** Lap times and stints still work there; the racing line
+  can't.
+- **Monaco has a ~50 minute hole in the middle of the race.** Sampling is
+  normal (about 4 Hz) either side of it, so a lap early in the race plots
+  fine while a lap in the middle returns nothing.
+- **A driver can be in the driver list with no usable laps.** Verstappen at
+  Zandvoort 2026 has a single lap row with a null duration, because he
+  retired on lap 1. The UI checks for this and says so rather than rendering
+  an empty plot.
 
 ## Limitations
 

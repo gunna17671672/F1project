@@ -1,8 +1,8 @@
 """
-Step 3: draw the path a car took around the track, colored by speed.
+Draw the path a car took around the track, colored by speed.
 
 The hard part isn't the drawing, it's getting the data into one table:
-  location  -> x, y, z  (where the car is)     ~4 Hz
+  location  -> x, y, z  (where the car is)      ~4 Hz
   car_data  -> speed    (what the car is doing) ~4 Hz
 
 These are two different endpoints, sampled independently, and their timestamps
@@ -21,14 +21,16 @@ import f1data
 from lap_times import load_laps
 
 
-def fastest_clean_lap(driver_number):
+def fastest_clean_lap(driver_number, session_key=None):
     """Return the row for this driver's quickest green-flag lap."""
-    df = load_laps(driver_number)
+    df = load_laps(driver_number, session_key)
     clean = df[df["clean"]]
+    if clean.empty:
+        return None
     return clean.loc[clean["lap_duration"].idxmin()]
 
 
-def specific_lap(driver_number, lap_number):
+def specific_lap(driver_number, lap_number, session_key=None):
     """
     Return a given lap number for this driver.
 
@@ -40,19 +42,14 @@ def specific_lap(driver_number, lap_number):
     It does NOT equalise tire compound or tire age - the two cars are on
     different strategies, so that difference is real and stays in the data.
     """
-    df = load_laps(driver_number)
+    df = load_laps(driver_number, session_key)
     match = df[df["lap_number"] == lap_number]
     if match.empty:
-        raise SystemExit(f"driver {driver_number} has no lap {lap_number}")
-    row = match.iloc[0]
-    if not row["clean"]:
-        print(f"  warning: lap {lap_number} for driver {driver_number} is "
-              f"not a clean lap ({row['lap_duration']:.1f}s) - "
-              f"safety car or pit lap?")
-    return row
+        return None
+    return match.iloc[0]
 
 
-def lap_telemetry(driver_number, lap):
+def lap_telemetry(driver_number, lap, session_key=None):
     """
     Fetch location + car_data for a single lap and merge them into one table.
 
@@ -60,13 +57,14 @@ def lap_telemetry(driver_number, lap):
     lap_duration, which is how I turn "lap 44" into a time window I can
     query the telemetry endpoints with.
     """
+    session_key = session_key or f1data.DEFAULT_SESSION
     start = pd.to_datetime(lap["date_start"])
     end = start + pd.Timedelta(seconds=lap["lap_duration"])
 
-    # OpenF1 wants ISO strings. I pad the window slightly on each end so I
-    # don't lose the first/last sample to rounding.
+    # Pad the window slightly so I don't lose the first/last sample to
+    # rounding.
     params = {
-        "session_key": f1data.SESSION_KEY,
+        "session_key": session_key,
         "driver_number": driver_number,
         "date>": (start - pd.Timedelta(seconds=1)).isoformat(),
         "date<": (end + pd.Timedelta(seconds=1)).isoformat(),
@@ -74,10 +72,18 @@ def lap_telemetry(driver_number, lap):
 
     loc = pd.DataFrame(f1data.get("location", **params))
     car = pd.DataFrame(f1data.get("car_data", **params))
+    if loc.empty or car.empty:
+        return pd.DataFrame()
 
     # merge_asof needs both sides sorted by the join key.
-    loc["date"] = pd.to_datetime(loc["date"])
-    car["date"] = pd.to_datetime(car["date"])
+    #
+    # format="ISO8601" matters: some sessions return timestamps with
+    # microseconds ("...T14:27:10.083000+00:00") and others without
+    # ("...T13:02:11+00:00"), sometimes in the same response. Without this,
+    # pandas infers the format from the first row and then throws on any row
+    # that doesn't match.
+    loc["date"] = pd.to_datetime(loc["date"], format="ISO8601")
+    car["date"] = pd.to_datetime(car["date"], format="ISO8601")
     loc = loc.sort_values("date")
     car = car.sort_values("date")
 
@@ -90,16 +96,17 @@ def lap_telemetry(driver_number, lap):
     )
 
     # If a location sample had no car_data within 0.5s, speed is NaN. Drop
-    # those rather than plotting a line segment with no color.
-    before = len(merged)
+    # those rather than plotting a segment with no color.
     merged = merged.dropna(subset=["speed"])
-    if before != len(merged):
-        print(f"  dropped {before - len(merged)} rows with no speed match")
 
     # x/y are in decimetres (I checked: ~9.9 units per metre against Spa's
     # official 7004 m lap). Convert to metres so the axes mean something.
     merged["x_m"] = merged["x"] / 10.0
     merged["y_m"] = merged["y"] / 10.0
+
+    # OpenF1 sometimes returns a few (0,0) rows when the GPS drops out. Those
+    # would draw a huge spike across the middle of the track map.
+    merged = merged[(merged["x"] != 0) | (merged["y"] != 0)]
 
     return merged
 
@@ -107,12 +114,11 @@ def lap_telemetry(driver_number, lap):
 def draw_line(ax, df, title, vmin, vmax):
     """Draw one racing line as segments colored by speed."""
     # A LineCollection lets each little segment have its own color, which is
-    # what makes the speed gradient work. A normal plot() can only do one color.
+    # what makes the gradient work. A normal plot() can only do one color.
     points = df[["x_m", "y_m"]].to_numpy().reshape(-1, 1, 2)
     segments = [[points[i][0], points[i + 1][0]] for i in range(len(points) - 1)]
 
     lc = LineCollection(segments, cmap="plasma", linewidth=3)
-    # Color each segment by the speed at its starting point.
     lc.set_array(df["speed"].to_numpy()[:-1])
     lc.set_clim(vmin, vmax)
     ax.add_collection(lc)
@@ -124,57 +130,89 @@ def draw_line(ax, df, title, vmin, vmax):
     return lc
 
 
-def main(lap_number=None):
-    fig, axes = plt.subplots(1, 2, figsize=(15, 8))
+def build_figure(session_key=None, drivers=None, lap_number=None):
+    """Returns (figure, list of per-driver info dicts)."""
+    session_key = session_key or f1data.DEFAULT_SESSION
+    drivers = drivers or f1data.DEFAULT_DRIVERS
 
-    laps, telem = {}, {}
-    for num in f1data.DRIVERS:
-        if lap_number is None:
-            lap = fastest_clean_lap(num)
-            print(f"{f1data.DRIVERS[num]}: fastest clean lap = "
-                  f"lap {int(lap['lap_number'])} ({lap['lap_duration']:.3f}s)")
-        else:
-            lap = specific_lap(num, lap_number)
-            print(f"{f1data.DRIVERS[num]}: lap {lap_number} "
-                  f"({lap['lap_duration']:.3f}s)")
-        laps[num] = lap
-        telem[num] = lap_telemetry(num, lap)
-        print(f"  {len(telem[num])} merged samples, "
-              f"speed {telem[num]['speed'].min():.0f}-"
-              f"{telem[num]['speed'].max():.0f} km/h")
+    fig, axes = plt.subplots(1, len(drivers), figsize=(7.5 * len(drivers), 8))
+    if len(drivers) == 1:
+        axes = [axes]
 
-    # Both plots share one color scale, otherwise the colors aren't comparable
+    laps, telem, info = {}, {}, []
+    missing = []
+    for num in drivers:
+        code = f1data.driver_code(session_key, num)
+        lap = (fastest_clean_lap(num, session_key) if lap_number is None
+               else specific_lap(num, lap_number, session_key))
+        if lap is None:
+            missing.append(f"{code} has no lap {lap_number}")
+            continue
+        t = lap_telemetry(num, lap, session_key)
+        if len(t) < 20:
+            # Not a crash - some sessions have real holes in their telemetry.
+            # Monaco 2026, for example, is missing about 50 minutes of
+            # location data in the middle of the race.
+            missing.append(f"{code} has no telemetry for lap "
+                           f"{int(lap['lap_number'])}")
+            continue
+        laps[num], telem[num] = lap, t
+
+    if not telem:
+        raise ValueError(
+            "No telemetry for this lap. " + "; ".join(missing) +
+            ". OpenF1's coverage has gaps in some sessions - try another lap "
+            "or another race.")
+
+    # All plots share one color scale, otherwise the colors aren't comparable
     # between drivers - which is the whole point of putting them side by side.
     vmin = min(t["speed"].min() for t in telem.values())
     vmax = max(t["speed"].max() for t in telem.values())
 
-    for ax, num in zip(axes, f1data.DRIVERS):
+    lc = None
+    for ax, num in zip(axes, drivers):
+        if num not in telem:
+            ax.axis("off")
+            continue
         lap = laps[num]
         n = int(lap["lap_number"])
-        compound, age = f1data.stint_at_lap(num, n)
+        code = f1data.driver_code(session_key, num)
+        compound, age = f1data.stint_at_lap(session_key, num, n)
         subtitle = f"{compound}, {age} laps old" if compound else ""
-        lc = draw_line(
-            ax, telem[num],
-            f"{f1data.DRIVERS[num]} - lap {n} "
-            f"({lap['lap_duration']:.3f}s)\n{subtitle}",
-            vmin, vmax,
-        )
+        lc = draw_line(ax, telem[num],
+                       f"{code} - lap {n} ({lap['lap_duration']:.3f}s)\n{subtitle}",
+                       vmin, vmax)
+        info.append({
+            "driver": code, "lap": n,
+            "lap_time": round(float(lap["lap_duration"]), 3),
+            "compound": compound, "tyre_age": age,
+            "samples": len(telem[num]),
+            "min_speed": int(telem[num]["speed"].min()),
+            "max_speed": int(telem[num]["speed"].max()),
+        })
 
     cbar = fig.colorbar(lc, ax=axes, orientation="horizontal",
                         fraction=0.05, pad=0.06)
     cbar.set_label("Speed (km/h)")
 
-    if lap_number is None:
-        mode = "each driver's fastest clean lap (different fuel loads - see README)"
-        outfile = "plots/racing_line.png"
-    else:
-        mode = f"both drivers on lap {lap_number} (same fuel load, same track state)"
-        outfile = f"plots/racing_line_lap{lap_number}.png"
+    mode = ("each driver's fastest clean lap (different fuel loads)"
+            if lap_number is None
+            else f"both drivers on lap {lap_number} "
+                 f"(same fuel load, same track state)")
+    fig.suptitle(f"Racing line colored by speed\n{mode}", fontsize=13)
+    return fig, info
 
-    fig.suptitle(f"Racing line colored by speed - Spa-Francorchamps 2026\n{mode}",
-                 fontsize=13)
-    plt.savefig(outfile, dpi=130, bbox_inches="tight")
-    print(f"saved {outfile}")
+
+def main(lap_number=None):
+    fig, info = build_figure(lap_number=lap_number)
+    for i in info:
+        print(f"{i['driver']}: lap {i['lap']} ({i['lap_time']}s), "
+              f"{i['samples']} merged samples, "
+              f"speed {i['min_speed']}-{i['max_speed']} km/h")
+    out = ("plots/racing_line.png" if lap_number is None
+           else f"plots/racing_line_lap{lap_number}.png")
+    fig.savefig(out, dpi=130, bbox_inches="tight")
+    print(f"saved {out}")
 
 
 if __name__ == "__main__":

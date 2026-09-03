@@ -10,6 +10,17 @@ scripts directly.
 The worked example throughout is the **Belgian GP 2026** at Spa-Francorchamps
 (`session_key=11334`), Norris vs Verstappen.
 
+![Racing line, colored by speed](screenshots/01_racing_line.png)
+
+<details>
+<summary>More screenshots (speed delta, lap times, tire degradation)</summary>
+
+![Speed delta / track dominance](screenshots/02_speed_delta.png)
+![Lap time comparison](screenshots/03_lap_times.png)
+![Tire degradation](screenshots/04_tire_degradation.png)
+
+</details>
+
 ## What's here
 
 | Script | What it does |
@@ -21,8 +32,57 @@ The worked example throughout is the **Belgian GP 2026** at Spa-Francorchamps
 | `racing_line.py` | Track map drawn from GPS coordinates, colored by speed |
 | `tire_deg.py` | Lap time vs tire age per stint, with a fuel-burn correction |
 | `speed_delta.py` | Where on track one driver gains or loses time on the other |
+| `export_data.py` | Pulls everything above out to plain CSV files in `data/` |
 
-Plots are written to `plots/`.
+Plots are written to `plots/`, screenshots of the app to `screenshots/`.
+
+## Resources this project is built from
+
+**Data source**
+
+- [OpenF1 API](https://openf1.org/) - free, keyless, real-time and historical
+  F1 timing/telemetry data. [API reference](https://openf1.org/) documents
+  every endpoint's parameters; it does *not* document GPS units or timestamp
+  format consistency, which is why those are worked out and written up in
+  [`data/DATA_DICTIONARY.md`](data/DATA_DICTIONARY.md) instead.
+
+**Language and libraries** (versions this was built and tested against)
+
+| | Version | Used for |
+| --- | --- | --- |
+| Python | 3.13.0 | |
+| [requests](https://requests.readthedocs.io/) | 2.34.2 | HTTP calls to OpenF1 |
+| [pandas](https://pandas.pydata.org/docs/) | 3.0.5 | All data wrangling; `merge_asof` specifically for the timestamp join - [docs](https://pandas.pydata.org/docs/reference/api/pandas.merge_asof.html) |
+| [numpy](https://numpy.org/doc/) | 2.5.2 | Arc-length distance calc, linear fits (`polyfit`) for tire degradation |
+| [matplotlib](https://matplotlib.org/stable/) | 3.11.1 | All plots; `LineCollection` specifically for the per-segment speed gradient - [docs](https://matplotlib.org/stable/gallery/lines_bars_and_markers/multicolored_line.html) |
+| [Streamlit](https://docs.streamlit.io/) | 1.63.0 | The UI |
+| [Playwright](https://playwright.dev/python/) | latest | Not a project dependency - used once, separately, to generate the screenshots in this README |
+
+**Tools**
+
+- [VS Code](https://code.visualstudio.com/) - editor
+- [GitHub CLI](https://cli.github.com/) (`gh`) - repo creation and push
+- Git - version control
+
+Full pinned list in [`requirements.txt`](requirements.txt).
+
+## The data itself
+
+`data/` has the actual CSV files this project runs on, pulled straight from
+OpenF1 - not just the plots built from them:
+
+| File | Rows | What it is |
+| --- | --- | --- |
+| `session_info.csv` | 1 | Which race this all is |
+| `drivers.csv` | 22 | Every driver on the grid that race |
+| `laps.csv` | 88 | Lap-by-lap timing for both compared drivers |
+| `stints.csv` | 4 | Tire compound and stint length for both drivers |
+| `telemetry_full_race.csv` | 39,430 | Every GPS position + speed sample, both drivers, all 44 laps - the row-level data the racing line and speed delta plots are built from |
+
+Full column-by-column documentation, units, and the quirks in the raw API
+data (decimetre GPS units, inconsistent timestamp formats, etc.) are in
+[`data/DATA_DICTIONARY.md`](data/DATA_DICTIONARY.md). Regenerate all of it
+with `python export_data.py`.
 
 ## Running it
 

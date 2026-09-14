@@ -86,6 +86,13 @@ model = LinearRegression()
 model.fit(train[FEATURES], train[TARGETS])
 pred = model.predict(test[FEATURES])
 
+# weight the model put on the baseline guess itself - should land near
+# 1.0 if the baseline's trustworthy. it was 0.57 before I filtered the
+# bad GPS rows out, which is what tipped me off to them in the first place
+coef = pd.DataFrame(model.coef_, index=TARGETS, columns=FEATURES).round(3)
+print(f"\nweight on baseline_dx/baseline_dy (should be ~1.0):")
+print(coef[["baseline_dx", "baseline_dy"]])
+
 # straight-line error in meters between predicted and real future spot.
 # basically a simplified ADE (the standard metric for this stuff)
 def displacement_error(dx_pred, dy_pred, dx_true, dy_true):

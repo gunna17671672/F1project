@@ -20,6 +20,7 @@ import lap_times
 import racing_line
 import speed_delta
 import tire_deg
+import trajectory_predict
 
 st.set_page_config(page_title="F1 Telemetry Explorer",
                    page_icon="🏎️", layout="wide")
@@ -50,6 +51,13 @@ def races(year):
 @st.cache_data(show_spinner=False)
 def drivers(session_key):
     return f1data.list_drivers(session_key)
+
+
+@st.cache_data(show_spinner=False)
+def trajectory_result():
+    # this is a fixed example (Belgian GP 2026, NOR/VER) built from a saved
+    # CSV, not the race/drivers picked in the sidebar - see the tab itself
+    return trajectory_predict.run_pipeline(verbose=False)
 
 
 @st.cache_data(show_spinner=False)
@@ -197,9 +205,9 @@ def download_button(fig, filename, key):
                        mime="image/png", key=key)
 
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     ["Racing line", "Speed delta", "Lap times",
-     "Tire degradation", "About the data"])
+     "Tire degradation", "Trajectory prediction", "About the data"])
 
 
 # --- racing line ---------------------------------------------------------
@@ -323,9 +331,69 @@ with tab4:
         st.error(f"Couldn't build the degradation plot: {e}")
 
 
-# --- notes ---------------------------------------------------------------
+# --- trajectory prediction (week 1 ML) ------------------------------------
 
 with tab5:
+    st.info(
+        "This tab is a fixed example - Belgian GP 2026, Norris vs "
+        "Verstappen - built from a saved data export, not whatever race/"
+        "drivers are picked in the sidebar. First scikit-learn model in "
+        "this project; everything else here is just plots.", icon="🧪")
+    try:
+        with st.spinner("Building lag features, fitting the model..."):
+            result = trajectory_result()
+
+        cols = st.columns(3)
+        with cols[0]:
+            st.metric("Baseline error", f"{result['baseline_mean']:.2f} m",
+                      help="Constant-velocity guess: assume the car keeps "
+                           "doing exactly what it's doing right now.")
+        with cols[1]:
+            st.metric("Model error", f"{result['model_mean']:.2f} m",
+                      help="Linear regression, predicting displacement "
+                           "~1 second ahead.")
+        with cols[2]:
+            st.metric("Improvement", f"{result['improvement']:.1f}%")
+
+        fig = dark(trajectory_predict.build_error_chart, result)
+        st.pyplot(fig, width="stretch")
+        download_button(fig, "trajectory_prediction_error.png", "dl_traj")
+        plt.close(fig)
+
+        st.caption(
+            f"Trained on {result['train_rows']} rows ({result['train_laps']} "
+            f"laps), tested on {result['test_rows']} rows "
+            f"({result['test_laps']} laps) it never saw - held out whole "
+            f"laps, not random rows, since samples ~0.25s apart are nearly "
+            f"identical.")
+
+        st.markdown("**Weight the model put on the baseline's own guess** "
+                    "(should be close to 1.0 if that guess is trustworthy):")
+        st.dataframe(result["coef"][["baseline_dx", "baseline_dy"]],
+                    width="stretch")
+
+        st.info(
+            f"About {result['glitch_pct']:.1f}% of rows had an implied "
+            f"speed above 100 m/s (360 km/h) - physically impossible, an "
+            f"F1 car tops out around 97 m/s. Real GPS glitches in the "
+            f"`location` feed. Before filtering these out, the model "
+            f"actually **lost** to the baseline, and the weight above was "
+            f"0.57 instead of ~1.0 - that's what pointed to the glitches "
+            f"in the first place.", icon="🛰️")
+
+        st.caption(
+            "Why the improvement is small: a linear model can't use "
+            "*where* the car is on track in any useful way, since the "
+            "track loops around and the relationship isn't a straight "
+            "line. A nonlinear model (random forest) that can use "
+            "position productively is the natural next step.")
+    except Exception as e:
+        st.error(f"Couldn't build the trajectory prediction: {e}")
+
+
+# --- notes ---------------------------------------------------------------
+
+with tab6:
     st.markdown("""
 ### Where this data comes from
 
